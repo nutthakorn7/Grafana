@@ -1,0 +1,190 @@
+# 📁 GLPN/nginx/nginx.conf
+worker_processes 1;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+  log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                  '$status $body_bytes_sent "$http_referer" '
+                  '"$http_user_agent" "$http_x_forwarded_for"';
+  access_log /var/log/nginx/access.log main;
+  error_log /var/log/nginx/error.log warn;
+
+  sendfile on;
+  keepalive_timeout 65;
+
+  server {
+    listen 80;
+    server_name log.cyberdefense.co.th prometheus.log.cyberdefense.co.th;
+
+    location /.well-known/acme-challenge/ {
+      root /var/www/certbot;
+    }
+
+    location / {
+      return 301 https://$host$request_uri;
+    }
+  }
+}
+
+# 📁 GLPN/nginx/conf.d/loki.conf
+server {
+  listen 443 ssl;
+  server_name log.cyberdefense.co.th;
+
+  ssl_certificate /etc/letsencrypt/live/log.cyberdefense.co.th/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/log.cyberdefense.co.th/privkey.pem;
+
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_ciphers HIGH:!aNULL:!MD5;
+
+  location / {
+    proxy_pass http://grafana:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+  }
+
+  location /loki/ {
+    proxy_pass http://loki:3100/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+
+    add_header 'Access-Control-Allow-Origin' "$http_origin" always;
+    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+    add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type' always;
+    add_header 'Access-Control-Allow-Credentials' 'true' always;
+  }
+}
+
+# 📁 GLPN/nginx/conf.d/prometheus.conf
+server {
+  listen 443 ssl;
+  server_name prometheus.log.cyberdefense.co.th;
+
+  ssl_certificate /etc/letsencrypt/live/prometheus.log.cyberdefense.co.th/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/prometheus.log.cyberdefense.co.th/privkey.pem;
+
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_ciphers HIGH:!aNULL:!MD5;
+
+  location / {
+    proxy_pass http://prometheus:9090;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+  }
+}
+
+# 📁 GLPN/loki/loki-config.yaml
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9095
+
+common:
+  path: /data
+  storage:
+    filesystem:
+      directory: /data
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+  - from: 2023-01-01
+    store: boltdb-shipper
+    object_store: filesystem
+    schema: v12
+    index:
+      prefix: index_
+      period: 24h
+
+limits_config:
+  retention_period: 2160h  # 90 วัน
+  max_streams_per_user: 10000
+  enforce_metric_name: false
+
+chunk_store_config:
+  max_look_back_period: 2160h
+
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 2160h
+
+# 📁 GLPN/promtail/config.yaml
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+positions:
+  filename: /tmp/positions.yaml
+
+target_config:
+  sync_period: 10s
+
+scrape_configs:
+  - job_name: docker
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: docker-logs
+          __path__: /var/lib/docker/containers/*/*.log
+          tenant: default
+    pipeline_stages:
+      - docker: {}
+
+# 📁 GLPN/prometheus/prometheus.yml
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+# 📁 GLPN/grafana/provisioning/datasources/datasource.yaml
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    access: proxy
+    orgId: 1
+    url: http://loki:3100
+    isDefault: true
+    jsonData:
+      maxLines: 1000
+
+# 📁 GLPN/grafana/provisioning/dashboards/dashboards.yaml
+apiVersion: 1
+
+providers:
+  - name: default
+    orgId: 1
+    folder: "Loki Dashboards"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
